@@ -3,28 +3,25 @@ from ultralytics import YOLO
 from annotate import annotate_frame
 from behavior import detect_behavior
 from alert import send_alert
+from face_processing import process_faces
 import time
+import os
 
 def main():
     try:
-        # Initialize YOLOv8 model
         model = YOLO('yolov8s.pt')
-        
-        # Initialize video capture (webcam or video file)
-        cap = cv2.VideoCapture(0)  # Change to 'test_video.mp4' for video file
+        cap = cv2.VideoCapture('test_video.mp4')  # Test video
         if not cap.isOpened():
-            print("Error: Could not open video source")
+            print("Error: Could not open video")
             return
 
-        # Get video properties
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30  # Default to 30 if FPS not available
+        fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
 
-        # Initialize video writer for demo
+        os.makedirs('demo', exist_ok=True)
         out = cv2.VideoWriter('demo/output.mp4', cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
-        # Initialize tracking variables
         tracks = {}
         person_positions = {}
         frame_id = 0
@@ -33,36 +30,29 @@ def main():
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                print("End of video or error reading frame")
+                print("End of video")
                 break
 
-            # Run YOLOv8 inference
             results = model(frame, verbose=False)
+            face_data = process_faces(frame, results)  # {track_id: {'name': str, 'emotion': str}}
+            alerts, tracks, person_positions = detect_behavior(
+                results, frame_id, face_data, tracks, person_positions, start_time, fps
+            )
+            annotated_frame = annotate_frame(frame, results, alerts, face_data)
 
-            # Annotate frame
-            annotated_frame = annotate_frame(frame, results)
-
-            # Detect behaviors
-            alerts, tracks, person_positions = detect_behavior(results, frame_id, tracks, start_time, person_positions, fps)
-
-            # Send alerts
             for alert in alerts:
-                send_alert(alert, frame_id)
+                send_alert(alert, frame_id, frame, face_data)
 
-            # Display and save frame
             cv2.imshow('Surveillance', annotated_frame)
             out.write(annotated_frame)
 
             frame_id += 1
-
-            # Exit on 'q' key
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
     except Exception as e:
         print(f"Error: {e}")
     finally:
-        # Cleanup
         cap.release()
         out.release()
         cv2.destroyAllWindows()
