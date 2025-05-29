@@ -6,6 +6,5 @@ torchvision==0.18.1
 pillow==10.4.0
 face_recognition
 reportlab
-tensorflow
-keras
-dlib==19.22.99
+dlib==19.22.1
+typing-extensions

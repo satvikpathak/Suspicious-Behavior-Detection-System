@@ -3,6 +3,7 @@ from reportlab.pdfgen import canvas
 import csv
 import os
 import time
+import cv2
 
 def send_alert(behavior, frame_id, frame, face_data):
     print(f"ALERT: {behavior} at frame {frame_id}")
