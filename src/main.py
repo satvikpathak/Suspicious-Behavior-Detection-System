@@ -11,20 +11,41 @@ def main():
     cap = None
     out = None
     try:
+        # Initialize YOLO model and FaceProcessor
         model = YOLO('yolov8s.pt')
         face_processor = FaceProcessor()
 
-        cap = cv2.VideoCapture(0)  # Use webcam (device 0)
+        # Prompt user to select input source
+        print("Select input source:")
+        print("1. Webcam (default)")
+        print("2. MP4 video file")
+        choice = input("Enter your choice (1 or 2): ").strip()
+
+        # Set up video capture based on user choice
+        if choice == "2":
+            video_path = input("Enter the path to your MP4 video (e.g., videos/sample.mp4): ").strip()
+            if not os.path.exists(video_path):
+                print(f"Error: Video file '{video_path}' not found")
+                return
+            cap = cv2.VideoCapture(video_path)
+        else:
+            video_path = "webcam"
+            cap = cv2.VideoCapture(0)  # Default to webcam
+
         if not cap.isOpened():
-            print("Error: Could not open webcam")
+            print(f"Error: Could not open {video_path}")
             return
 
+        # Get video properties
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+        frame_delay = int(1000 / fps)  # Delay in milliseconds to match FPS
 
+        # Set up output video writer
         os.makedirs('demo', exist_ok=True)
-        out = cv2.VideoWriter('demo/output.mp4', cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+        output_filename = f"demo/output_{os.path.basename(video_path).replace('.mp4', '')}_{int(time.time())}.mp4"
+        out = cv2.VideoWriter(output_filename, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
         tracks = {}
         person_positions = {}
@@ -34,8 +55,8 @@ def main():
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret or frame is None or frame.size == 0:
-                print("Error: Could not read valid frame from webcam")
-                continue
+                print("End of video or error reading frame")
+                break
 
             results = model(frame, verbose=False)
 
@@ -51,12 +72,10 @@ def main():
 
             annotated_frame = annotate_frame(frame, results, alerts, face_data)
 
-            # ✅ Add check before imshow/write
             if annotated_frame is None or annotated_frame.size == 0:
                 print(f"Warning: Invalid annotated frame at frame {frame_id}")
                 frame_id += 1
                 continue
-
 
             for alert in alerts:
                 send_alert(alert, frame_id, frame, face_data)
@@ -66,7 +85,9 @@ def main():
 
             frame_id += 1
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # Add delay to simulate real-time playback for both webcam and MP4
+            key = cv2.waitKey(frame_delay)
+            if key & 0xFF == ord('q'):
                 print("Exiting on user command.")
                 break
 
