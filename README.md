@@ -1,4 +1,5 @@
-# Suspicious Behavior Detection System 🚨
+# 🚨 Rakshak AI 🚨
+# Suspicious Behavior Detection System 
 
 **Team Cypher | Cytherthon.ai Hackathon – May 2025**
 
