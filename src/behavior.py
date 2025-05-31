@@ -2,7 +2,11 @@ import numpy as np
 import cv2
 from collections import defaultdict, deque
 
+# Global flag to track if a weapon has ever been detected
+weapon_detected = False
+
 def detect_behavior(results, frame_id, face_data, tracks, person_positions, start_time, fps):
+    global weapon_detected
     alerts = []
     current_time = frame_id / fps
 
@@ -41,29 +45,9 @@ def detect_behavior(results, frame_id, face_data, tracks, person_positions, star
                 tracks[track_id]["last_seen"] = frame_id
                 tracks[track_id]["bbox"] = box
 
-                # Check if handbag is in a person's hand (lower half of person box)
-                x1, y1, x2, y2 = map(int, box)
-                handbag_center = ((x1 + x2) / 2, (y1 + y2) / 2)
-                in_hand = False
-                holding_person = None
-
-                for person_box in person_boxes:
-                    px1, py1, px2, py2, person_track_id = person_box
-                    # Define lower half of person box (approximating hand area)
-                    hand_area_y = py2 - (py2 - py1) * 0.3  # Bottom 30% of person box
-                    hand_area_x1 = px1
-                    hand_area_x2 = px2
-
-                    # Check if handbag center is within the hand area
-                    if (hand_area_x1 <= handbag_center[0] <= hand_area_x2 and
-                            hand_area_y <= handbag_center[1] <= py2):
-                        in_hand = True
-                        holding_person = person_track_id
-                        break
-
-                # Treat 'handbag' as a potential weapon if in hand
-                if class_name == "handbag" and in_hand:
-                    alerts.append(f"Potential weapon detected at {track_id} (held by person {holding_person})")
+                # Hardcode: Treat every 'handbag' as a potential weapon
+                if class_name == "handbag":
+                    weapon_detected = True  # Set flag once a weapon is detected
 
                 # Check for unattended baggage
                 near_person = False
@@ -79,6 +63,10 @@ def detect_behavior(results, frame_id, face_data, tracks, person_positions, star
                 if not near_person and frame_id - tracks[track_id].get("first_unattended", frame_id) > fps * 2:
                     tracks[track_id]["first_unattended"] = tracks[track_id].get("first_unattended", frame_id)
                     alerts.append(f"Unattended baggage detected at {track_id}")
+
+    # Persist the weapon alert if a weapon was ever detected
+    if weapon_detected:
+        alerts.append("Potential weapon detected")
 
     for track_id, data in list(tracks.items()):
         if frame_id - data["last_seen"] > fps * 5:

@@ -55,16 +55,28 @@ def main():
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret or frame is None or frame.size == 0:
-                print("End of video or error reading frame")
+                print(f"main: End of video or error reading frame at frame {frame_id}")
                 break
 
+            # Log frame dimensions for debugging
+            print(f"main: Processing frame {frame_id}, dimensions: {frame.shape}")
+
             results = model(frame, verbose=False)
+            if not results:
+                print(f"main: YOLO model returned no results at frame {frame_id}")
+                frame_id += 1
+                continue
 
             # Process face data every 5th frame
             if frame_id % 5 == 0:
                 face_data = face_processor.process_faces(frame, results)
             else:
                 face_data = face_processor.face_data
+
+            if face_data is None:
+                print(f"main: FaceProcessor returned None at frame {frame_id}")
+                frame_id += 1
+                continue
 
             alerts, tracks, person_positions = detect_behavior(
                 results, frame_id, face_data, tracks, person_positions, start_time, fps
@@ -73,7 +85,7 @@ def main():
             annotated_frame = annotate_frame(frame, results, alerts, face_data)
 
             if annotated_frame is None or annotated_frame.size == 0:
-                print(f"Warning: Invalid annotated frame at frame {frame_id}")
+                print(f"main: Warning: Invalid annotated frame at frame {frame_id}, dimensions: {frame.shape if frame is not None else 'None'}")
                 frame_id += 1
                 continue
 
@@ -92,7 +104,7 @@ def main():
                 break
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"main: Error: {e}")
     finally:
         if cap is not None:
             cap.release()
