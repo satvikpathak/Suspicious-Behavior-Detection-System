@@ -8,3 +8,6 @@ face_recognition
 reportlab
 dlib==19.22.1
 typing-extensions
+flask==3.0.3
+flask-cors==5.0.0
+pytz==2024.2 

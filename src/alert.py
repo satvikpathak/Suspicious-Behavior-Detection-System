@@ -5,6 +5,36 @@ import os
 import time
 import cv2
 
+def check_alert_conditions(results, face_results):
+    """
+    Check conditions for generating alerts based on YOLOv8 results and face recognition results.
+    Returns a list of alert messages.
+    """
+    alerts = []
+
+    # Check YOLOv8 results for suspicious objects (e.g., weapons)
+    for result in results:
+        boxes = result.boxes.xyxy.cpu().numpy()
+        classes = result.boxes.cls.cpu().numpy()
+        scores = result.boxes.conf.cpu().numpy()
+
+        for box, cls, score in zip(boxes, classes, scores):
+            if score < 0.5:
+                continue
+            class_name = result.names[int(cls)]
+            if class_name == "handbag":  # Example: Treat handbag as a potential weapon
+                alerts.append("Potential weapon detected (handbag)")
+
+    # Check face recognition results for known suspects or suspicious emotions
+    if face_results:
+        for track_id, data in face_results.items():
+            if data["name"] != "Unknown":
+                alerts.append(f"Known suspect detected: {data['name']}")
+            if data.get("emotion") == "Angry":
+                alerts.append(f"Suspicious emotion detected: {data['name']} is Angry")
+
+    return alerts
+
 def send_alert(behavior, frame_id, frame, face_data):
     print(f"ALERT: {behavior} at frame {frame_id}")
     
