@@ -327,6 +327,42 @@ class EnhancedThreatDetector:
         self.backpack_threat_score = 0
         self.fps = 30  # Assume default FPS for timing calculations
 
+        # Initialize face detection (Haar Cascade)
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        if self.face_cascade.empty():
+            print("Warning: Could not load Haar Cascade for face detection")
+
+        # Initialize ORB for feature matching
+        self.orb = cv2.ORB_create()
+
+        # Load reference images
+        try:
+            self.shivam_img = cv2.imread('criminal_shivam.jpg', cv2.IMREAD_GRAYSCALE)
+            if self.shivam_img is None:
+                raise FileNotFoundError("Could not load criminal_shivam.jpg")
+            self.shivam_kp, self.shivam_desc = self.orb.detectAndCompute(self.shivam_img, None)
+            print("Successfully loaded criminal_shivam.jpg")
+        except Exception as e:
+            print(f"Error loading criminal_shivam.jpg: {e}")
+            self.shivam_img = None
+            self.shivam_kp = None
+            self.shivam_desc = None
+
+        try:
+            self.gun_img = cv2.imread('gun.jpg', cv2.IMREAD_GRAYSCALE)
+            if self.gun_img is None:
+                raise FileNotFoundError("Could not load gun.jpg")
+            self.gun_kp, self.gun_desc = self.orb.detectAndCompute(self.gun_img, None)
+            print("Successfully loaded gun.jpg")
+        except Exception as e:
+            print(f"Error loading gun.jpg: {e}")
+            self.gun_img = None
+            self.gun_kp = None
+            self.gun_desc = None
+
+        # Initialize BFMatcher for feature matching
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
     def generate_detection_pdf(self, frame, timestamp, detections, behaviors, emotions):
         """Generate a PDF report for detections in the current frame"""
         try:
@@ -452,8 +488,7 @@ class EnhancedThreatDetector:
                         
                         # Detect guns and gun images on phones
                         category, specific_type = self.categorize_object_enhanced(label)
-                        if any(keyword in label.lower() for keyword in ['gun', 'pistol', 'rifle', 'firearm', 'handgun', 'revolver', 'shotgun']) or \
-                           (label.lower() in ['phone', 'cell phone'] and self.detect_gun_image(frame[x1:x2, y1:y2])):
+                        if any(keyword in label.lower() for keyword in ['gun', 'pistol', 'rifle', 'firearm', 'handgun', 'revolver', 'shotgun']):
                             category = "weapon_gun"
                             specific_type = "GUN"
                             threat_score = 60  # Instantly set threat level to 60
@@ -476,11 +511,99 @@ class EnhancedThreatDetector:
                             "confidence": conf,
                             "threat_score": threat_score
                         })
-            
+
+            # Add face detection for Shivam
+            shivam_detections = self.detect_face_shivam(frame)
+            detections.extend(shivam_detections)
+
+            # Enhance detections with gun image matching
+            detections = self.detect_gun_image_enhanced(frame, detections)
+
             return detections
         except Exception as e:
             print(f"Error in detect_objects: {e}")
             return []
+
+    def detect_face_shivam(self, frame):
+        """Detect if the face in criminal_shivam.jpg is present in the frame"""
+        if self.shivam_img is None or self.shivam_desc is None:
+            return []
+
+        try:
+            # Convert frame to grayscale
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # Detect faces
+            faces = self.face_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            matches = []
+
+            for (x, y, w, h) in faces:
+                # Extract face region
+                face_region = gray_frame[y:y+h, x:x+w]
+                # Resize to match reference image size for better matching
+                face_region = cv2.resize(face_region, (self.shivam_img.shape[1], self.shivam_img.shape[0]))
+
+                # Compute ORB features
+                kp, desc = self.orb.detectAndCompute(face_region, None)
+                if desc is None:
+                    continue
+
+                # Match descriptors
+                matches_bf = self.bf.match(self.shivam_desc, desc)
+                matches_bf = sorted(matches_bf, key=lambda x: x.distance)
+
+                # Count good matches
+                good_matches = [m for m in matches_bf if m.distance < 50]  # Adjust threshold as needed
+                if len(good_matches) > 15:  # Adjust threshold for match confidence
+                    matches.append({
+                        "bbox": [x, y, x+w, y+h],
+                        "label": "Shivam Cri",
+                        "category": "person",
+                        "confidence": len(good_matches) / 50.0,  # Normalize to 0-1
+                        "threat_score": 95  # High threat score for known criminal
+                    })
+
+            return matches
+        except Exception as e:
+            print(f"Error in detect_face_shivam: {e}")
+            return []
+
+    def detect_gun_image_enhanced(self, frame, detections):
+        """Detect if gun.jpg-like image is present in objects (e.g., phone screens)"""
+        if self.gun_img is None or self.gun_desc is None:
+            return detections
+
+        try:
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            new_detections = detections.copy()
+
+            for det in new_detections:
+                if det["category"] in ["common_object", "other"] and det["label"].lower() in ["phone", "cell phone"]:
+                    x1, y1, x2, y2 = det["bbox"]
+                    region = gray_frame[y1:y2, x1:x2]
+                    if region.size == 0:
+                        continue
+
+                    # Resize region to match gun.jpg size
+                    region = cv2.resize(region, (self.gun_img.shape[1], self.gun_img.shape[0]))
+                    kp, desc = self.orb.detectAndCompute(region, None)
+                    if desc is None:
+                        continue
+
+                    # Match descriptors
+                    matches_bf = self.bf.match(self.gun_desc, desc)
+                    matches_bf = sorted(matches_bf, key=lambda x: x.distance)
+                    good_matches = [m for m in matches_bf if m.distance < 50]  # Adjust threshold
+
+                    if len(good_matches) > 10:  # Adjust threshold for match confidence
+                        det["label"] = "gun/pistol"
+                        det["category"] = "weapon_gun"
+                        det["threat_score"] = 90  # High threat for gun image
+                        det["confidence"] = min(len(good_matches) / 30.0, 1.0)  # Normalize to 0-1
+
+            return new_detections
+        except Exception as e:
+            print(f"Error in detect_gun_image_enhanced: {e}")
+            return detections
 
     def detect_gun_image(self, region):
         """Basic check for gun-like image on phone screen"""
