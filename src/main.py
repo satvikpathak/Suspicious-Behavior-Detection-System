@@ -49,7 +49,7 @@ WEAPON_KEYWORDS = {
 }
 
 # Suspicious objects that could be used as weapons
-SUSPICIOUS_OBJECTS = ['bottle', 'scissors', 'axe', 'chainsaw', 'tool', 'screwdriver', 'wrench']
+SUSPICIOUS_OBJECTS = ['bottle', 'scissor', 'axe', 'chainsaw', 'tool', 'screwdriver', 'wrench']
 
 # Common objects for context (to avoid false positives)
 COMMON_OBJECTS = ['cell phone', 'phone', 'laptop', 'bag', 'backpack', 'book', 'cup', 'remote', 'mouse']
@@ -282,7 +282,6 @@ class BehaviorStabilizer:
             person_key = f"{emotion_data['bbox'][0]}_{emotion_data['bbox'][1]}"
             emotion = emotion_data['emotion']
             confidence = emotion_data['confidence']
-            
             self.emotion_history[person_key].append((emotion, confidence, emotion_data['threat_emotion']))
             
             if len(self.emotion_history[person_key]) >= 5:
@@ -438,7 +437,7 @@ class EnhancedThreatDetector:
             print(f"Error generating PDF: {e}")
         
     def detect_objects(self, frame):
-        """Enhanced object detection with improved weapon classification"""
+        """Enhanced object detection with improved weapon classification and gun image detection"""
         try:
             results = object_model(frame, conf=0.2, iou=0.5)
             detections = []
@@ -451,11 +450,23 @@ class EnhancedThreatDetector:
                         class_id = int(box.cls)
                         label = object_model.names[class_id]
                         
-                        # Enhanced categorization and threat scoring
+                        # Detect guns and gun images on phones
                         category, specific_type = self.categorize_object_enhanced(label)
-                        threat_score = self.calculate_threat_score(label, category, conf)
+                        if any(keyword in label.lower() for keyword in ['gun', 'pistol', 'rifle', 'firearm', 'handgun', 'revolver', 'shotgun']) or \
+                           (label.lower() in ['phone', 'cell phone'] and self.detect_gun_image(frame[x1:x2, y1:y2])):
+                            category = "weapon_gun"
+                            specific_type = "GUN"
+                            threat_score = 60  # Instantly set threat level to 60
+                            # Make bounding box square
+                            size = max(x2-x1, y2-y1)
+                            center_x, center_y = (x1+x2)//2, (y1+y2)//2
+                            x1 = center_x - size//2
+                            x2 = center_x + size//2
+                            y1 = center_y - size//2
+                            y2 = center_y + size//2
+                        else:
+                            threat_score = self.calculate_threat_score(label, category, conf)
                         
-                        # Use specific weapon type if identified
                         display_label = specific_type if specific_type else label
                         
                         detections.append({
@@ -470,6 +481,25 @@ class EnhancedThreatDetector:
         except Exception as e:
             print(f"Error in detect_objects: {e}")
             return []
+
+    def detect_gun_image(self, region):
+        """Basic check for gun-like image on phone screen"""
+        try:
+            # Convert to grayscale and apply edge detection
+            gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 100, 200)
+            
+            # Simple heuristic: look for gun-like shapes (elongated rectangles)
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                if cv2.contourArea(cnt) > 100:  # Filter small contours
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    aspect_ratio = w / h if h > 0 else 0
+                    if 2 < aspect_ratio < 5 and w > h:  # Typical gun shape
+                        return True
+            return False
+        except:
+            return False
 
     def categorize_object_enhanced(self, label):
         """Enhanced object categorization with specific weapon types"""
