@@ -7,6 +7,10 @@ import math
 from collections import defaultdict, deque
 import onnxruntime as ort
 import glob
+import time
+import subprocess
+import tempfile
+from datetime import datetime
 
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -307,15 +311,131 @@ class BehaviorStabilizer:
                     })
         
         return stable_emotions
+    
+# Ensure demo directory exists
+DEMO_DIR = "../demo"
+os.makedirs(DEMO_DIR, exist_ok=True)
 
 class EnhancedThreatDetector:
     def __init__(self):
         self.frame_history = []
         self.threat_history = []
         self.max_history = 10
-        
         self.object_tracker = StabilizedTracker(stability_threshold=3, max_age=10)
         self.behavior_stabilizer = BehaviorStabilizer(stability_frames=5, cooldown_frames=10)
+        self.backpack_first_detected_time = None
+        self.backpack_frame_count = 0
+        self.backpack_threat_score = 0
+        self.fps = 30  # Assume default FPS for timing calculations
+
+    def generate_detection_pdf(self, frame, timestamp, detections, behaviors, emotions):
+        """Generate a PDF report for detections in the current frame"""
+        try:
+            # Save frame temporarily as JPEG
+            temp_dir = tempfile.gettempdir()
+            frame_filename = os.path.join(temp_dir, f"frame_{timestamp}.jpg")
+            cv2.imwrite(frame_filename, frame)
+
+            # Prepare LaTeX content
+            latex_content = r"""
+\documentclass[a4paper,12pt]{article}
+\usepackage{graphicx}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{times}
+
+\begin{document}
+
+\begin{center}
+    \textbf{\Large Threat Detection Report} \\
+    \vspace{0.5cm}
+    \textbf{Timestamp:} """ + timestamp + r""" \\
+    \vspace{0.5cm}
+\end{center}
+
+\section*{Detected Items}
+\begin{itemize}
+"""
+            # Add detected objects
+            if detections:
+                for det in detections:
+                    label = det["label"]
+                    conf = det["confidence"]
+                    threat = det["threat_score"]
+                    category = det["category"]
+                    latex_content += f"    \\item \\textbf{{Object:}} {label}, Confidence: {conf:.2f}, Threat Score: {threat}, Category: {category}\n"
+            else:
+                latex_content += "    \\item No objects detected\n"
+
+            latex_content += r"""
+\end{itemize}
+
+\section*{Detected Behaviors}
+\begin{itemize}
+"""
+            # Add detected behaviors
+            if behaviors:
+                for behavior in behaviors:
+                    latex_content += f"    \\item {behavior}\n"
+            else:
+                latex_content += "    \\item No behaviors detected\n"
+
+            latex_content += r"""
+\end{itemize}
+
+\section*{Detected Emotions}
+\begin{itemize}
+"""
+            # Add detected emotions
+            if emotions:
+                for emo in emotions:
+                    emotion = emo["emotion"]
+                    conf = emo["confidence"]
+                    threat = "Yes" if emo["threat_emotion"] else "No"
+                    latex_content += f"    \\item \\textbf{{Emotion:}} {emotion}, Confidence: {conf:.1f}\%, Threatening: {threat}\n"
+            else:
+                latex_content += "    \\item No emotions detected\n"
+
+            latex_content += r"""
+\end{itemize}
+
+\section*{Frame Snapshot}
+\begin{center}
+    \includegraphics[width=0.9\textwidth]{ """ + frame_filename.replace("\\", "/") + r""" }
+\end{center}
+
+\end{document}
+"""
+
+            # Write LaTeX file
+            timestamp_clean = timestamp.replace(":", "-").replace(" ", "_")
+            latex_filename = os.path.join(temp_dir, f"report_{timestamp_clean}.tex")
+            pdf_filename = os.path.join(DEMO_DIR, f"threat_report_{timestamp_clean}.pdf")
+            with open(latex_filename, "w") as f:
+                f.write(latex_content)
+
+            # Compile LaTeX to PDF
+            subprocess.run(["latexmk", "-pdf", "-pdflatex=pdflatex", latex_filename, f"-output-directory={DEMO_DIR}"], check=True)
+
+            # Clean up temporary LaTeX files
+            for ext in [".tex", ".aux", ".log", ".fdb_latexmk", ".fls"]:
+                try:
+                    os.remove(latex_filename.replace(".tex", ext))
+                except:
+                    pass
+            try:
+                os.remove(frame_filename)
+            except:
+                pass
+
+            print(f"📄 PDF report saved as: {pdf_filename}")
+
+        except Exception as e:
+            print(f"Error generating PDF: {e}")
         
     def detect_objects(self, frame):
         """Enhanced object detection with improved weapon classification"""
@@ -396,6 +516,8 @@ class EnhancedThreatDetector:
             base_score = 35  # Suspicious objects moderate-low
         elif category == "person":
             base_score = 5   # People are minimal threat by default
+        elif label_lower == "backpack":
+            base_score = self.backpack_threat_score  # Use dynamic backpack threat score
         else:
             base_score = 1   # Everything else is minimal
         
@@ -404,6 +526,37 @@ class EnhancedThreatDetector:
         final_score = int(base_score * confidence_multiplier)
         
         return min(max(final_score, 1), 100)  # Ensure score is between 1-100
+
+    def update_backpack_threat(self, detections, frame_count):
+        """Update backpack threat score based on detection duration"""
+        backpack_detected = any(d["label"].lower() == "backpack" for d in detections)
+        
+        if backpack_detected:
+            if self.backpack_first_detected_time is None:
+                self.backpack_first_detected_time = time.time()
+            self.backpack_frame_count += 1
+            
+            elapsed_time = time.time() - self.backpack_first_detected_time
+            
+            if elapsed_time >= 5:  # After 5 seconds
+                frames_since_escalation_start = self.backpack_frame_count - int(5 * self.fps)
+                if frames_since_escalation_start >= 0:
+                    increments = frames_since_escalation_start // 10
+                    self.backpack_threat_score = min(20 + increments * 15, 95)
+                else:
+                    self.backpack_threat_score = 20
+            else:
+                self.backpack_threat_score = 0
+        else:
+            # Reset if backpack is no longer detected
+            self.backpack_first_detected_time = None
+            self.backpack_frame_count = 0
+            self.backpack_threat_score = 0
+        
+        # Update threat scores for backpack detections
+        for detection in detections:
+            if detection["label"].lower() == "backpack":
+                detection["threat_score"] = self.calculate_threat_score("backpack", "common_object", detection["confidence"])
 
     def detect_poses(self, frame):
         """Enhanced pose detection"""
@@ -428,6 +581,13 @@ class EnhancedThreatDetector:
         behaviors = []
         person_detections = [d for d in detections if d["category"] == "person"]
         
+        # Check for backpack near person
+        for i, person in enumerate(person_detections):
+            backpack_nearby = self.check_backpack_nearby(person, detections)
+            if backpack_nearby:
+                threat_score = self.backpack_threat_score if self.backpack_threat_score > 0 else 40
+                behaviors.append(f"Suspicious Body Language Detected [Score: {threat_score}]")
+        
         for i, pose in enumerate(poses):
             if i >= len(person_detections):
                 break
@@ -449,6 +609,24 @@ class EnhancedThreatDetector:
                 behaviors.append(behavior_text)
         
         return behaviors
+
+    def check_backpack_nearby(self, person, detections, threshold=150):
+        """Check if a backpack is near a person"""
+        px1, py1, px2, py2 = person["bbox"]
+        person_center = ((px1 + px2) // 2, (py1 + py2) // 2)
+        
+        backpack_detections = [d for d in detections if d["label"].lower() == "backpack"]
+        
+        for backpack in backpack_detections:
+            bx1, by1, bx2, by2 = backpack["bbox"]
+            backpack_center = ((bx1 + bx2) // 2, (by1 + by2) // 2)
+            distance = math.sqrt((person_center[0] - backpack_center[0])**2 + 
+                                 (person_center[1] - backpack_center[1])**2)
+            
+            if distance < threshold:
+                return True
+        
+        return False
 
     def analyze_single_pose(self, keypoints):
         """Analyze individual pose for threatening behaviors"""
@@ -525,8 +703,9 @@ class EnhancedThreatDetector:
             "Raised Right Arm": 20,
             "Fighting Stance": 70,
             "Aiming Stance": 85,
-            "Wide Aggressive Stance": 60,
-            "Lunging Motion": 75
+            "Wide Aggressive Stance": 30,
+            "Lunging Motion": 5,
+            "Suspicious Body Language Detected": self.backpack_threat_score if self.backpack_threat_score > 0 else 20
         }
         
         base_score = base_scores.get(behavior, 10)
@@ -755,6 +934,9 @@ class EnhancedThreatDetector:
             # Detect objects
             raw_detections = self.detect_objects(frame)
             
+            # Update backpack threat score
+            self.update_backpack_threat(raw_detections, self.backpack_frame_count + 1)
+            
             # Update tracker with detections
             stable_detections = self.object_tracker.update(raw_detections)
             
@@ -773,6 +955,11 @@ class EnhancedThreatDetector:
             
             # Stabilize emotions
             stable_emotions = self.behavior_stabilizer.update_emotions(raw_emotions)
+            
+            # Generate PDF if any detections exist
+            if stable_detections or stable_behaviors or stable_emotions:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.generate_detection_pdf(frame, timestamp, stable_detections, stable_behaviors, stable_emotions)
             
             # Calculate overall threat level
             overall_threat = self.calculate_overall_threat(stable_detections, stable_behaviors, stable_emotions)
@@ -1019,6 +1206,9 @@ def main():
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if not is_webcam else -1
     
+    # Set detector FPS for accurate timing
+    detector.fps = fps
+    
     print(f"📐 Resolution: {width}x{height}")
     print(f"🎯 FPS: {fps}")
     if not is_webcam:
@@ -1102,7 +1292,7 @@ def main():
                                 print(f"   🔫 {weapon['label']} detected (confidence: {weapon['confidence']:.2f})")
                     
                     if behaviors:
-                        threatening_behaviors = [b for b in behaviors if "ARMED" in b or "Fighting" in b or "Aiming" in b]
+                        threatening_behaviors = [b for b in behaviors if "ARMED" in b or "Fighting" in b or "Aiming" in b or "Suspicious" in b]
                         if threatening_behaviors:
                             for behavior in threatening_behaviors:
                                 print(f"   🥊 {behavior}")
