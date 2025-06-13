@@ -1,116 +1,264 @@
 import cv2
+import numpy as np
 from ultralytics import YOLO
-from annotate import annotate_frame
-from behavior import detect_behavior
-from alert import send_alert
-from face_processing import FaceProcessor
-import time
 import os
+import logging
 
-def main():
-    cap = None
-    out = None
+# Suppress TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+
+# Load YOLOv9 model (use a lighter model for speed)
+object_model = YOLO("yolov9c.pt")  # Switch to yolov9t.pt if available for faster inference
+
+# Load pre-trained ONNX model for emotion detection
+try:
+    emotion_net = cv2.dnn.readNetFromONNX("emotion_model.onnx")
+    print("Successfully loaded emotion_model.onnx")
+except cv2.error as e:
+    print(f"Failed to load emotion_model.onnx: {e}")
+    print("Please ensure the file exists in the src/ directory and is a valid ONNX model.")
+    exit()
+
+# Update emotion labels to match emotion-ferplus-8.onnx
+EMOTION_LABELS = ["neutral", "happiness", "surprise", "sadness", "anger", "disgust", "fear", "contempt"]
+
+def preprocess_frame(frame, target_size=(640, 640)):
+    """
+    Preprocess frame by resizing and converting to RGB.
+    Args:
+        frame: Input frame.
+        target_size: Tuple of (width, height) for resizing.
+    Returns:
+        Preprocessed frame.
+    """
+    resized_frame = cv2.resize(frame, target_size)
+    return resized_frame
+
+def detect_objects(frame):
+    """
+    Detect objects (guns, knives, phones, bags, etc.) in the frame using YOLOv9.
+    Args:
+        frame: A numpy array (image) from cv2.
+    Returns:
+        List of detections with bounding boxes, labels, and confidence scores.
+    """
     try:
-        # Initialize YOLO model and FaceProcessor
-        model = YOLO('yolov8s.pt')
-        face_processor = FaceProcessor()
-
-        # Prompt user to select input source
-        print("Select input source:")
-        print("1. Webcam (default)")
-        print("2. MP4 video file")
-        choice = input("Enter your choice (1 or 2): ").strip()
-
-        # Set up video capture based on user choice
-        if choice == "2":
-            video_path = input("Enter the path to your MP4 video (e.g., videos/sample.mp4): ").strip()
-            if not os.path.exists(video_path):
-                print(f"Error: Video file '{video_path}' not found")
-                return
-            cap = cv2.VideoCapture(video_path)
-        else:
-            video_path = "webcam"
-            cap = cv2.VideoCapture(0)  # Default to webcam
-
-        if not cap.isOpened():
-            print(f"Error: Could not open {video_path}")
-            return
-
-        # Get video properties
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
-        frame_delay = int(1000 / fps)  # Delay in milliseconds to match FPS
-
-        # Set up output video writer
-        os.makedirs('demo', exist_ok=True)
-        output_filename = f"demo/output_{os.path.basename(video_path).replace('.mp4', '')}_{int(time.time())}.mp4"
-        out = cv2.VideoWriter(output_filename, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
-
-        tracks = {}
-        person_positions = {}
-        frame_id = 0
-        start_time = time.time()
-
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret or frame is None or frame.size == 0:
-                print(f"main: End of video or error reading frame at frame {frame_id}")
-                break
-
-            # Log frame dimensions for debugging
-            print(f"main: Processing frame {frame_id}, dimensions: {frame.shape}")
-
-            results = model(frame, verbose=False)
-            if not results:
-                print(f"main: YOLO model returned no results at frame {frame_id}")
-                frame_id += 1
-                continue
-
-            # Process face data every 5th frame
-            if frame_id % 5 == 0:
-                face_data = face_processor.process_faces(frame, results)
-            else:
-                face_data = face_processor.face_data
-
-            if face_data is None:
-                print(f"main: FaceProcessor returned None at frame {frame_id}")
-                frame_id += 1
-                continue
-
-            alerts, tracks, person_positions = detect_behavior(
-                results, frame_id, face_data, tracks, person_positions, start_time, fps
-            )
-
-            annotated_frame = annotate_frame(frame, results, alerts, face_data)
-
-            if annotated_frame is None or annotated_frame.size == 0:
-                print(f"main: Warning: Invalid annotated frame at frame {frame_id}, dimensions: {frame.shape if frame is not None else 'None'}")
-                frame_id += 1
-                continue
-
-            for alert in alerts:
-                send_alert(alert, frame_id, frame, face_data)
-
-            cv2.imshow('Surveillance', annotated_frame)
-            out.write(annotated_frame)
-
-            frame_id += 1
-
-            # Add delay to simulate real-time playback for both webcam and MP4
-            key = cv2.waitKey(frame_delay)
-            if key & 0xFF == ord('q'):
-                print("Exiting on user command.")
-                break
-
+        print(f"Detecting objects in frame of shape: {frame.shape}")
+        results = object_model(frame, imgsz=640)  # Use smaller image size for speed
+        detections = []
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                conf = float(box.conf)
+                label = object_model.names[int(box.cls)]
+                if label in ["person", "gun", "knife", "cell phone", "backpack", "bag", "suitcase"]:
+                    detections.append({
+                        "bbox": [x1, y1, x2, y2],
+                        "label": label,
+                        "confidence": conf
+                    })
+        print(f"Detected {len(detections)} objects: {detections}")
+        return detections
     except Exception as e:
-        print(f"main: Error: {e}")
-    finally:
-        if cap is not None:
-            cap.release()
-        if out is not None:
-            out.release()
-        cv2.destroyAllWindows()
+        print(f"Error in detect_objects: {e}")
+        return []
 
+def detect_emotions(frame, person_detections):
+    """
+    Detect emotions for detected persons using a pre-trained ONNX model.
+    Args:
+        frame: A numpy array (image) from cv2.
+        person_detections: List of person detections.
+    Returns:
+        List of emotions for detected persons.
+    """
+    emotions = []
+    for person in person_detections:
+        x1, y1, x2, y2 = person["bbox"]
+        face_img = frame[y1:y2, x1:x2]
+        if face_img.size == 0:
+            emotions.append({"bbox": [x1, y1, x2, y2], "emotion": "unknown"})
+            continue
+
+        # Preprocess face for emotion detection
+        face_img = cv2.resize(face_img, (64, 64))  # Adjusted to match emotion-ferplus-8.onnx input
+        face_img = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+        blob = cv2.dnn.blobFromImage(face_img, 1.0, (64, 64), (0, 0, 0), swapRB=False, crop=False)
+        emotion_net.setInput(blob)
+        emotion_probs = emotion_net.forward()
+        emotion_idx = np.argmax(emotion_probs[0])
+        emotion_label = EMOTION_LABELS[emotion_idx]
+        emotions.append({"bbox": [x1, y1, x2, y2], "emotion": emotion_label})
+
+    print(f"Detected emotions: {emotions}")
+    return emotions
+
+def detect_threats(detections):
+    """
+    Detect potential threats based on object detections.
+    Args:
+        detections: List of object detections.
+    Returns:
+        List of threat alerts.
+    """
+    threats = []
+    person_detections = [d for d in detections if d["label"] == "person"]
+    threat_objects = [d for d in detections if d["label"] in ["gun", "knife", "backpack", "bag", "suitcase"]]
+
+    for person in person_detections:
+        px1, py1, px2, py2 = person["bbox"]
+        person_center = ((px1 + px2) // 2, (py1 + py2) // 2)
+
+        for obj in threat_objects:
+            ox1, oy1, ox2, oy2 = obj["bbox"]
+            obj_center = ((ox1 + ox2) // 2, (oy1 + oy2) // 2)
+
+            # Calculate distance between person and object
+            dist = np.sqrt((person_center[0] - obj_center[0])**2 + (person_center[1] - obj_center[1])**2)
+            
+            # If the person is close to a threatening object, flag it as a threat
+            if dist < 100:  # Adjust threshold based on your video resolution
+                threats.append(f"Potential Threat: Person with {obj['label']}")
+
+    print(f"Threats detected: {threats}")
+    return threats
+
+def annotate_frame(frame, detections, threats, emotions):
+    """
+    Annotate the frame with detections, threats, and emotions.
+    Args:
+        frame: A numpy array (image) from cv2.
+        detections: List of object detections.
+        threats: List of threat alerts.
+        emotions: List of facial emotions.
+    Returns:
+        Annotated frame.
+    """
+    annotated_frame = frame.copy()
+
+    # Draw bounding boxes and labels for detections
+    for detection in detections:
+        x1, y1, x2, y2 = detection["bbox"]
+        label = detection["label"]
+        conf = detection["confidence"]
+        color = (0, 255, 0) if label == "person" else (0, 0, 255)  # Green for person, red for objects
+        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            annotated_frame,
+            f"{label}: {conf:.2f}",
+            (x1, y1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            2
+        )
+
+    # Draw threat alerts near the person
+    person_detections = [d for d in detections if d["label"] == "person"]
+    for i, person in enumerate(person_detections):
+        x1, y1, x2, y2 = person["bbox"]
+        for threat in threats:
+            if "Person" in threat:  # Assuming threat is tied to a person
+                cv2.putText(
+                    annotated_frame,
+                    threat,
+                    (x1, y2 + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 255),  # Red for threats
+                    2
+                )
+
+    # Draw emotions near the person's face
+    for emotion in emotions:
+        x1, y1, x2, y2 = emotion["bbox"]
+        emotion_label = emotion["emotion"]
+        cv2.putText(
+            annotated_frame,
+            f"Emotion: {emotion_label}",
+            (x1, y2 + 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255),  # Yellow for emotions
+            2
+        )
+
+    return annotated_frame
+
+def process_frame(frame):
+    """
+    Process a frame for objects, threats, and emotions.
+    Args:
+        frame: A numpy array (image) from cv2.
+    Returns:
+        Tuple of (detections, threats, emotions).
+    """
+    # Preprocess frame for faster inference
+    processed_frame = preprocess_frame(frame, target_size=(640, 640))
+    
+    # Detect objects
+    detections = detect_objects(processed_frame)
+    
+    # Detect threats
+    threats = detect_threats(detections)
+    
+    # Detect emotions for persons
+    person_detections = [d for d in detections if d["label"] == "person"]
+    emotions = detect_emotions(processed_frame, person_detections)
+    
+    return detections, threats, emotions
+
+# Add a main block for testing with video file and real-time visualization
 if __name__ == "__main__":
-    main()
+    # Path to the video file
+    video_path = "../videos/sector17.mp4"  # Relative to src/
+    
+    # Check if the video file exists
+    if not os.path.exists(video_path):
+        print(f"Video file not found: {video_path}")
+        exit()
+
+    # Open the video file
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Failed to open video file: {video_path}")
+        exit()
+
+    # Process frames from the video and display in a window
+    frame_count = 0
+    skip_frames = 2  # Process every 2nd frame for speed
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("End of video or failed to read frame")
+            break
+
+        frame_count += 1
+        if frame_count % skip_frames != 0:  # Skip frames to speed up
+            continue
+
+        print(f"\nProcessing frame {frame_count}")
+        
+        # Process the frame
+        detections, threats, emotions = process_frame(frame)
+        
+        # Annotate the frame with detections, threats, and emotions
+        annotated_frame = annotate_frame(frame, detections, threats, emotions)
+        
+        # Display the annotated frame in a window
+        cv2.imshow("Rakshak AI - Real-Time Threat Detection", annotated_frame)
+        
+        # Print results for this frame
+        print(f"Frame {frame_count} Results - Detections: {detections}")
+        print(f"Frame {frame_count} Threats: {threats}")
+        print(f"Frame {frame_count} Emotions: {emotions}")
+
+        # Add a small delay and check for 'q' key to quit
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Release the video capture object and close the window
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Video processing completed")
